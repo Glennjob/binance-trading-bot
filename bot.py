@@ -151,6 +151,7 @@ def main():
             avg_volume = np.mean(vols[-14:])
 
             print(f"RSI: {rsi_values[-1]:.2f} (seuils ajustés {rsi_lower:.1f}/{rsi_upper:.1f}) - Prix: {last_price:.2f} - Volatilité: {volatility:.5f}")
+            print(f"MACD: {macd_line[-1]:.2f} - Signal: {signal_line[-1]:.2f} - Histogramme: {histogram[-1]:.2f}")
 
             balance_usdt = get_balance("USDT")
 
