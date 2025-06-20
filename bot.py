@@ -1,123 +1,61 @@
 import os
-import json
 import time
-import pandas as pd
+import json
 import numpy as np
-import yfinance as yf
-from sklearn.ensemble import RandomForestClassifier
 from binance.client import Client
+from binance.enums import *
+
 from dotenv import load_dotenv
-
-# Charger les variables d'environnement
 load_dotenv()
-api_key = os.getenv('BINANCE_API_KEY')
-api_secret = os.getenv('BINANCE_API_SECRET')
 
-# Initialiser Binance testnet
-client = Client(api_key, api_secret)
-client.API_URL = 'https://testnet.binance.vision/api'
+# Connexion Binance
+api_key = os.getenv("API_KEY")
+api_secret = os.getenv("API_SECRET")
+client = Client(api_key, api_secret, testnet=True)
 
-# Fichier pour stocker la position actuelle
-POSITION_FILE = "position.json"
+symbol = "BTCUSDT"
+interval = Client.KLINE_INTERVAL_1HOUR
+quantity = 0.001  # à ajuster selon ton solde Testnet
 
-# Lire/écrire la position
-def read_position():
-    if not os.path.exists(POSITION_FILE):
-        return {"position": "none", "buy_price": 0.0}
-    with open(POSITION_FILE, "r") as f:
-        return json.load(f)
+# Charger la position
+if os.path.exists("position.json"):
+    with open("position.json") as f:
+        position = json.load(f)
+else:
+    position = {"in_position": False, "buy_price": 0}
 
-def write_position(position, buy_price):
-    with open(POSITION_FILE, "w") as f:
-        json.dump({"position": position, "buy_price": buy_price}, f)
+def get_rsi(prices, period=14):
+    deltas = np.diff(prices)
+    gains = deltas[deltas > 0].sum() / period
+    losses = -deltas[deltas < 0].sum() / period
+    rs = gains / losses if losses != 0 else 0
+    return 100 - (100 / (1 + rs))
 
-# Charger les données BTC pour IA
-def get_btc_data():
-    df = yf.download('BTC-USD', start='2023-01-01', end='2024-01-01', interval='1d')
-    df['MA5'] = df['Close'].rolling(window=5).mean()
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['Return'] = df['Close'].pct_change()
-    df.dropna(inplace=True)
-    df['Target'] = np.where(df['Close'].shift(-1) > df['Close'], 1, 0)
-    return df
+while True:
+    candles = client.get_klines(symbol=symbol, interval=interval, limit=100)
+    closes = [float(c[4]) for c in candles]
+    rsi = get_rsi(closes)
+    last_price = closes[-1]
 
-# Calcul automatique de la quantité de BTC à acheter pour un montant donné
-def get_btc_quantity(usdt_amount, current_price):
-    return round(usdt_amount / current_price, 6)
+    print(f"RSI: {rsi:.2f} - Last Price: {last_price}")
 
-# Fonction principale
-def run_bot():
-    print(">>> BOT IA DE TRADING - DÉBUT <<<")
-    data = get_btc_data()
-    features = ['Open', 'High', 'Low', 'Close', 'Volume', 'MA5', 'MA20']
-    X = data[features]
-    y = data['Target']
+    if rsi < 30 and not position["in_position"]:
+        print("💰 Achat déclenché")
+        client.order_market_buy(symbol=symbol, quantity=quantity)
+        position["in_position"] = True
+        position["buy_price"] = last_price
 
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
-    model.fit(X, y)
+    elif position["in_position"]:
+        buy_price = position["buy_price"]
+        pnl = (last_price - buy_price) / buy_price * 100
 
-    last_data = X.iloc[-1].values.reshape(1, -1)
-    prediction = model.predict(last_data)[0]
+        if pnl > 5 or rsi > 70 or pnl < -2:
+            print("🚨 Vente déclenchée")
+            client.order_market_sell(symbol=symbol, quantity=quantity)
+            position["in_position"] = False
+            position["buy_price"] = 0
 
-    position_data = read_position()
-    ticker = client.get_symbol_ticker(symbol="BTCUSDT")
-    current_price = float(ticker['price'])
+    with open("position.json", "w") as f:
+        json.dump(position, f)
 
-    print(f"Prix actuel : {current_price:.2f} USDT")
-
-    if position_data["position"] == "none":
-        if prediction == 1:
-            print("📈 Prédiction HAUSSE → Achat BTC")
-            quantity = get_btc_quantity(10, current_price)
-            try:
-                order = client.order_market_buy(
-                    symbol='BTCUSDT',
-                    quoteOrderQty=10
-                )
-                print("✅ Ordre d'achat passé :", order['fills'][0]['price'], "USDT")
-                write_position("long", current_price)
-            except Exception as e:
-                print("❌ Erreur lors de l'achat :", e)
-        else:
-            print("🕒 Pas de signal d'achat aujourd'hui.")
-
-    elif position_data["position"] == "long":
-        buy_price = position_data["buy_price"]
-        pnl = (current_price - buy_price) / buy_price * 100
-        print(f"💼 Position ouverte | Buy @ {buy_price} | PnL = {pnl:.2f}%")
-
-        if pnl <= -2:
-            print("🔻 Stop-loss déclenché → Vente BTC")
-            balance = client.get_asset_balance(asset='BTC')
-            quantity = float(balance['free'])
-            try:
-                client.order_market_sell(
-                    symbol='BTCUSDT',
-                    quantity=round(quantity, 6)
-                )
-                print("✅ Ordre de vente exécuté (stop-loss)")
-                write_position("none", 0.0)
-            except Exception as e:
-                print("❌ Erreur lors de la vente :", e)
-
-        elif pnl >= 3:
-            print("🚀 Take-profit atteint → Vente BTC")
-            balance = client.get_asset_balance(asset='BTC')
-            quantity = float(balance['free'])
-            try:
-                client.order_market_sell(
-                    symbol='BTCUSDT',
-                    quantity=round(quantity, 6)
-                )
-                print("✅ Ordre de vente exécuté (take-profit)")
-                write_position("none", 0.0)
-            except Exception as e:
-                print("❌ Erreur lors de la vente :", e)
-        else:
-            print("🔄 Position conservée.")
-
-    print(">>> BOT TERMINÉ <<<\n")
-
-# Lancer le bot
-if __name__ == "__main__":
-    run_bot()
+    time.sleep(3600)  # Attendre 1h
